@@ -3225,6 +3225,12 @@ class GameControllerService: ObservableObject {
     }
 
     func isIgnored(slot: Int) -> Bool {
+        // Explicit Raw HID selection takes precedence for this physical pad.
+        // Ignore the macOS profile only while its raw interface remains open.
+        if slot >= 0 && slot < connectedControllers.count,
+           RawHIDGamepadService.shared.isReplacingGameController(connectedControllers[slot]) {
+            return true
+        }
         guard !ignoredDevices.isEmpty, let id = deviceIdentity(at: slot) else { return false }
         // Entries saved before 1.7 name the model only, and still count.
         if ignoredDevices.contains(id) { return true }
