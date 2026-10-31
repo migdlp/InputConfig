@@ -121,11 +121,15 @@ struct DevicesMenuContent: View {
             // Its own helper reads it as a controller; its keyboard and
             // mouse interfaces are only lizard mode.
             Text("\(entry.name) (read automatically as a Steam Controller)")
-        } else if ownedBySystem {
-            // GameController already reads it and it shows up as a
-            // controller on its own. Connecting it here too would double
-            // every input, so it is not switchable.
-            Text("\(entry.name) (read by macOS GameController)")
+        } else if ownedBySystem, let device {
+            // Opt in to raw HID for a pad with an incomplete macOS profile.
+            // The GCController slot is silenced only when the raw device opens.
+            Button("\(entry.name) (try Raw HID instead, experimental)") {
+                let opened = gamepads.adopt(device, remember: false, preferRawHID: true)
+                if !opened && RawHIDGamepadService.blockedByInputMonitoring(device) {
+                    RawHIDGamepadService.requestInputMonitoring()
+                }
+            }
         } else if !reading, let device, RawHIDGamepadService.blockedByInputMonitoring(device) {
             // Opening it needs Input Monitoring. InputConfig asks for it only
             // here, on this click: macOS lists an app in the Input Monitoring
