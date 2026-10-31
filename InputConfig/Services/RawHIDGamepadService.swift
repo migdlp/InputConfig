@@ -66,6 +66,9 @@ final class RawHIDGamepadService: ObservableObject {
     /// Interfaces opened by hand or remembered from an earlier manual
     /// connection. These stay open even if GameController lists the device.
     private var forcedKeys: Set<UInt64> = []
+    /// Session-scoped, explicit Raw HID preference for a pad that macOS already reads.
+    /// Do not ignore the GameController slot until opening raw HID succeeds.
+    private var rawPreferredKeys: Set<UInt64> = []
     /// Logitech wheels sent the native-mode switch, by location, and when:
     /// within half a minute the same wheel is not switched again (it is
     /// read as it is if the switch did nothing); a later plug-in is.
@@ -708,6 +711,7 @@ final class RawHIDGamepadService: ObservableObject {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
         forcedKeys.removeAll()
+        rawPreferredKeys.removeAll()
         awaitingGameController.removeAll()
 
         for (_, gamepad) in openDevices {
@@ -771,6 +775,17 @@ final class RawHIDGamepadService: ObservableObject {
         connectedGamepads.contains { $0.vendorID == vendorID && $0.productID == productID }
     }
 
+    /// A GCController for which the user explicitly chose raw HID.
+    /// Match the actual controller object, rather than merely its display name.
+    func isReplacingGameController(_ controller: GCController) -> Bool {
+        openDevices.values.contains { pad in
+            guard rawPreferredKeys.contains(pad.id), let device = pad.device else {
+                return false
+            }
+            return listedController(for: device) === controller
+        }
+    }
+
     /// Connect a device the user picked from the Devices menu. Skips the
     /// "leave it to the GameController framework" wait, and when neither
     /// a profile nor the descriptor parser can describe the reports, reads
@@ -778,9 +793,10 @@ final class RawHIDGamepadService: ObservableObject {
     /// still finds whichever bit a control flips. A device GameController
     /// already lists is refused: reading it here too doubles every input.
     @discardableResult
-    func adopt(_ device: IOHIDDevice, remember: Bool = true) -> Bool {
+    func adopt(_ device: IOHIDDevice, remember: Bool = true,
+               preferRawHID: Bool = false) -> Bool {
         guard let info = readDeviceInfo(device) else { return false }
-        if isListedByGameController(device) {
+        if isListedByGameController(device) && !preferRawHID {
             ActivityLog.shared.info("Devices", "Not connecting \(info.productName) by hand: macOS GameController already reads it")
             return false
         }
@@ -800,10 +816,12 @@ final class RawHIDGamepadService: ObservableObject {
             ActivityLog.shared.info("Devices", "\(info.productName) is already being read; nothing to connect")
             if remember { HIDDeviceRegistry.remember(device, true) }
             forcedKeys.insert(info.key)
+            if preferRawHID { rawPreferredKeys.insert(info.key) }
             return false
         }
         let opened = handleDeviceAttached(device, forced: true)
         if opened {
+            if preferRawHID { rawPreferredKeys.insert(info.key) }
             if remember {
                 HIDDeviceRegistry.remember(device, true)
             }
@@ -1358,6 +1376,7 @@ final class RawHIDGamepadService: ObservableObject {
         guard let key else { return }
 
         forcedKeys.remove(key)
+        rawPreferredKeys.remove(key)
         awaitingGameController.remove(key)
         if let gamepad = openDevices.removeValue(forKey: key), let device = gamepad.device {
             IOHIDDeviceUnscheduleFromRunLoop(device,
