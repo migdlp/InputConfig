@@ -69,6 +69,10 @@ final class RawHIDGamepadService: ObservableObject {
     /// Session-scoped, explicit Raw HID preference for a pad that macOS already reads.
     /// Do not ignore the GameController slot until opening raw HID succeeds.
     private var rawPreferredKeys: Set<UInt64> = []
+    /// The Krom Key exposes buttons as HID elements even when its report
+    /// callback is silent under Apple's GameController profile.
+    /// Opened only after the user explicitly selects "try Raw HID".
+    private var kromValueManager: IOHIDManager?
     /// Logitech wheels sent the native-mode switch, by location, and when:
     /// within half a minute the same wheel is not switched again (it is
     /// read as it is if the switch did nothing); a later plug-in is.
@@ -712,6 +716,7 @@ final class RawHIDGamepadService: ObservableObject {
         wakeObserver = nil
         forcedKeys.removeAll()
         rawPreferredKeys.removeAll()
+        stopKromValueReaderIfUnused()
         awaitingGameController.removeAll()
 
         for (_, gamepad) in openDevices {
@@ -743,6 +748,71 @@ final class RawHIDGamepadService: ObservableObject {
     }
 
     // MARK: - Device lifecycle
+
+    // MARK: - Krom Key button-value fallback
+
+    /// IOKit's input-value path is the one confirmed to carry button usages
+    /// 7 (L2) and 8 (R2) on the Krom Key 2563:0575, even with GameController
+    /// attached. The normal generic report decoder remains active as well.
+    private func startKromValueReaderIfNeeded() {
+        guard kromValueManager == nil else { return }
+        guard openDevices.values.contains(where: {
+            $0.vendorID == 0x2563 && $0.productID == 0x0575 && rawPreferredKeys.contains($0.id)
+        }) else { return }
+
+        let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let match: [String: Any] = [
+            kIOHIDVendorIDKey as String: 0x2563,
+            kIOHIDProductIDKey as String: 0x0575
+        ]
+        IOHIDManagerSetDeviceMatching(mgr, match as CFDictionary)
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterInputValueCallback(mgr, { context, _, _, value in
+            guard let context else { return }
+            let element = IOHIDValueGetElement(value)
+            guard IOHIDElementGetUsagePage(element) == 0x09 else { return }
+            let usage = IOHIDElementGetUsage(element)
+            guard usage >= 1 && usage <= 32 else { return }
+            let pressed = IOHIDValueGetIntegerValue(value) > 0
+            let service = Unmanaged<RawHIDGamepadService>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor in service.acceptKromButton(usage: usage, pressed: pressed) }
+        }, selfPtr)
+        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(),
+                                         CFRunLoopMode.commonModes.rawValue)
+        let result = IOHIDManagerOpen(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard result == kIOReturnSuccess else {
+            IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetMain(),
+                                               CFRunLoopMode.commonModes.rawValue)
+            ActivityLog.shared.warning("Devices", "Krom HID value fallback could not start (IOKit: \(result))")
+            return
+        }
+        kromValueManager = mgr
+        ActivityLog.shared.info("Devices", "Krom Key: direct HID button-value reader enabled")
+    }
+
+    private func acceptKromButton(usage: UInt32, pressed: Bool) {
+        guard !rawPreferredKeys.isEmpty else { return }
+        // HID Button usages are one-based, InputConfig's button indices are zero-based.
+        // Merge with the report parser's state so only the changed button is updated.
+        var state = ControllerState()
+        state.buttons[Int(usage) - 1] = pressed ? 1.0 : 0.0
+        for pad in openDevices.values where
+            pad.vendorID == 0x2563 && pad.productID == 0x0575
+                && rawPreferredKeys.contains(pad.id) {
+            pad.updateState(state)
+        }
+    }
+
+    private func stopKromValueReaderIfUnused() {
+        guard let mgr = kromValueManager else { return }
+        guard !openDevices.values.contains(where: {
+            $0.vendorID == 0x2563 && $0.productID == 0x0575 && rawPreferredKeys.contains($0.id)
+        }) else { return }
+        kromValueManager = nil
+        IOHIDManagerClose(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetMain(),
+                                           CFRunLoopMode.commonModes.rawValue)
+    }
 
     // MARK: - Manual connection (InputConfig ▸ Devices)
 
@@ -816,12 +886,18 @@ final class RawHIDGamepadService: ObservableObject {
             ActivityLog.shared.info("Devices", "\(info.productName) is already being read; nothing to connect")
             if remember { HIDDeviceRegistry.remember(device, true) }
             forcedKeys.insert(info.key)
-            if preferRawHID { rawPreferredKeys.insert(info.key) }
+            if preferRawHID {
+                rawPreferredKeys.insert(info.key)
+                startKromValueReaderIfNeeded()
+            }
             return false
         }
         let opened = handleDeviceAttached(device, forced: true)
         if opened {
-            if preferRawHID { rawPreferredKeys.insert(info.key) }
+            if preferRawHID {
+                rawPreferredKeys.insert(info.key)
+                startKromValueReaderIfNeeded()
+            }
             if remember {
                 HIDDeviceRegistry.remember(device, true)
             }
@@ -1388,6 +1464,7 @@ final class RawHIDGamepadService: ObservableObject {
             buf.deallocate()
         }
         reportBufferSizes.removeValue(forKey: key)
+        stopKromValueReaderIfUnused()
         connectedGamepads.removeAll { $0.id == key || portIDs.contains($0.id) }
         unidentifiedDevices.removeAll { $0.id == key }
     }
