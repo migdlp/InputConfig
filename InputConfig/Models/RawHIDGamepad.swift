@@ -37,6 +37,27 @@ final class RawHIDGamepad: Identifiable, @unchecked Sendable {
 
     private let lock = NSLock()
     private var _state = ControllerState()
+    /// The Krom 2563:0575 supplies button values through IOKit's element callback.
+    /// Once that reader is enabled, report decoding may still update axes/hats
+    /// but must not overwrite its button state (which would create double taps).
+    private var _directHIDButtons = false
+
+    func enableDirectHIDButtons() {
+        lock.lock()
+        _directHIDButtons = true
+        lock.unlock()
+    }
+
+    func updateDirectHIDButton(index: Int, pressed: Bool) {
+        let value: Float = pressed ? 1 : 0
+        lock.lock()
+        // Unchanged button reports, including duplicate interface callbacks,
+        // must not create a new button transition.
+        if _state.buttons[index] != value {
+            _state.buttons[index] = value
+        }
+        lock.unlock()
+    }
 
     init(device: IOHIDDevice,
          id: UInt64,
@@ -123,7 +144,9 @@ final class RawHIDGamepad: Identifiable, @unchecked Sendable {
         if !newValue.motion.isEmpty { imu.markReport() }
         ControllerPowerService.shared.noteRaw(key: id, state: newValue)
         lock.lock()
-        _state.buttons.merge(newValue.buttons) { _, new in new }
+        if !_directHIDButtons {
+            _state.buttons.merge(newValue.buttons) { _, new in new }
+        }
         _state.axes.merge(newValue.axes) { _, new in new }
         _state.hats.merge(newValue.hats) { _, new in new }
         _state.motion.merge(newValue.motion) { _, new in new }
