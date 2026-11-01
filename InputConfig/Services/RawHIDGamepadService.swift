@@ -787,19 +787,24 @@ final class RawHIDGamepadService: ObservableObject {
             return
         }
         kromValueManager = mgr
+        // Reports remain available for sticks and hats. Button presses are
+        // supplied only by the element-value callback, avoiding two readers
+        // fighting to set the same button to 0/1 on a single physical press.
+        for pad in openDevices.values where pad.vendorID == 0x2563 &&
+            pad.productID == 0x0575 && rawPreferredKeys.contains(pad.id) {
+            pad.enableDirectHIDButtons()
+        }
         ActivityLog.shared.info("Devices", "Krom Key: direct HID button-value reader enabled")
     }
 
     private func acceptKromButton(usage: UInt32, pressed: Bool) {
         guard !rawPreferredKeys.isEmpty else { return }
-        // HID Button usages are one-based, InputConfig's button indices are zero-based.
-        // Merge with the report parser's state so only the changed button is updated.
-        var state = ControllerState()
-        state.buttons[Int(usage) - 1] = pressed ? 1.0 : 0.0
+        // HID Button usages are one-based, InputConfig's indices zero-based.
+        // This is the only writer of buttons while this Krom raw reader runs.
         for pad in openDevices.values where
             pad.vendorID == 0x2563 && pad.productID == 0x0575
                 && rawPreferredKeys.contains(pad.id) {
-            pad.updateState(state)
+            pad.updateDirectHIDButton(index: Int(usage) - 1, pressed: pressed)
         }
     }
 
@@ -889,6 +894,10 @@ final class RawHIDGamepadService: ObservableObject {
             if preferRawHID {
                 rawPreferredKeys.insert(info.key)
                 startKromValueReaderIfNeeded()
+                if info.vendorID == 0x2563 && info.productID == 0x0575 &&
+                   kromValueManager != nil {
+                    openDevices[info.key]?.enableDirectHIDButtons()
+                }
             }
             return false
         }
