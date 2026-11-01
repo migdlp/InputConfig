@@ -799,12 +799,26 @@ final class RawHIDGamepadService: ObservableObject {
 
     private func acceptKromButton(usage: UInt32, pressed: Bool) {
         guard !rawPreferredKeys.isEmpty else { return }
-        // HID Button usages are one-based, InputConfig's indices zero-based.
-        // This is the only writer of buttons while this Krom raw reader runs.
+        // Krom Key 2563:0575 has a nonstandard face-button ordering.
+        // Confirmed physical buttons A, X, Y, B currently produce K, J, I, U
+        // with the existing InputConfig preset (0=J, 1=K, 2=U, 3=I).
+        // Normalize the four USB HID button usages to the profile's indices:
+        // physical A (usage 2) -> index 0, X (usage 1) -> index 2,
+        // Y (usage 4) -> index 3, B (usage 3) -> index 1.
+        // All shoulders and triggers keep their normal usage - 1 indices:
+        // L1/R1 = 4/5, L2/R2 = 6/7, as verified on this Krom Key.
+        let buttonIndex: Int
+        switch usage {
+        case 1: buttonIndex = 2  // X -> X
+        case 2: buttonIndex = 0  // A -> A
+        case 3: buttonIndex = 1  // B -> B
+        case 4: buttonIndex = 3  // Y -> Y
+        default: buttonIndex = Int(usage) - 1
+        }
         for pad in openDevices.values where
             pad.vendorID == 0x2563 && pad.productID == 0x0575
                 && rawPreferredKeys.contains(pad.id) {
-            pad.updateDirectHIDButton(index: Int(usage) - 1, pressed: pressed)
+            pad.updateDirectHIDButton(index: buttonIndex, pressed: pressed)
         }
     }
 
